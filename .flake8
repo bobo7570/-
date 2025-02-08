@@ -1,0 +1,41 @@
+[flake8]
+max-line-length = 100
+exclude =
+    .git,
+    __pycache__,
+    build,
+    dist,
+    *.egg-info,
+    venv,
+    .tox,
+    .pytest_cache,
+    .mypy_cache,
+    .coverage,
+    htmlcov
+max-complexity = 10
+select = C,E,F,W,B,B950
+ignore =
+    # E203: whitespace before ':'
+    E203,
+    # E501: line too long
+    E501,
+    # W503: line break before binary operator
+    W503,
+    # W504: line break after binary operator
+    W504,
+    # E402: module level import not at top of file
+    E402,
+    # B950: line too long
+    B950
+per-file-ignores =
+    # imported but unused
+    __init__.py: F401
+    # missing docstring in public module
+    tests/*: D100,D101,D102,D103,D104,D105,D106,D107
+docstring-convention = google
+import-order-style = google
+application-import-names = app_auto_tool
+inline-quotes = double
+multiline-quotes = double
+docstring-quotes = double
+avoid-escape = True 

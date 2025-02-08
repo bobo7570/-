@@ -1,0 +1,82 @@
+# App自动化测试配置文件
+
+# 平台配置
+platform:
+  type: "android"  # android 或 ios
+  version: ""      # 平台版本号，可选
+
+# Appium配置
+appium:
+  host: "127.0.0.1"
+  port: 4723
+  base_path: "/wd/hub"  # 添加base_path配置
+  # 自动安装的appium版本
+  version: "2.0.0"
+
+# 设备配置
+devices:
+  # Android设备配置
+  android:
+    - id: ""  # 设备ID，为空时自动获取
+      platform_version: ""  # 设备系统版本，可选
+      app_package: "com.android.launcher3"  # 应用包名
+      app_activity: ".Launcher"   # 应用入口Activity
+      no_reset: true  # 是否在测试前重置应用
+      auto_grant_permissions: true  # 自动授予权限
+  
+  # iOS设备配置
+  ios:
+    - udid: ""  # 设备UDID，为空时自动获取
+      platform_version: ""  # 设备系统版本，可选
+      bundle_id: "com.example.app"  # 应用Bundle ID
+      no_reset: true  # 是否在测试前重置应用
+
+# 测试配置
+test:
+  # 测试用例目录
+  case_dir: "test_cases"
+  # 测试报告目录
+  report_dir: "reports"
+  # 并发设备数
+  max_concurrent_devices: 1
+  # 失败重试次数
+  retry_count: 2
+  # 测试超时时间（秒）
+  timeout: 300
+  # 测试模块
+  modules:
+    - name: "通用"
+      enabled: true
+    - name: "好友"
+      enabled: true
+    - name: "社区"
+      enabled: true
+
+# 录制配置
+record:
+  # 录制文件保存目录
+  save_dir: "test_cases/recorded"
+  # 录制超时时间（秒）
+  timeout: 1800
+  # 操作间隔时间（秒）
+  action_interval: 0.5
+
+# 断言配置
+assert:
+  # 断言文件保存目录
+  save_dir: "test_cases/asserts"
+  # 断言超时时间（秒）
+  timeout: 10
+  # 断言重试间隔（秒）
+  retry_interval: 0.5
+
+# 日志配置
+log:
+  # 日志级别
+  level: "INFO"
+  # 日志文件目录
+  dir: "logs"
+  # 日志文件大小限制（MB）
+  max_size: 500
+  # 日志文件保留数量
+  backup_count: 10 

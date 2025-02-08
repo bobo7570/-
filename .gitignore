@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.project
+.pydevproject
+.settings/
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# Test
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+
+# Build
+*.spec
+*.manifest
+*.application
+*.exe
+*.msi
+
+# Project specific
+recordings/*
+!recordings/.gitkeep
+reports/*
+!reports/.gitkeep
+config.json
+*.qrc.py
+*.qrc.cpp
+*.qrc.h
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini 

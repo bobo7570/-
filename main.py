@@ -27,37 +27,40 @@ logger.add(
 )
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        self.setWindowTitle("App自动化测试可视化工具")
-        self.setGeometry(100, 100, 1200, 800)
+        self.config = config
+        self.current_device = None
+        self.init_ui()
+        self.init_tabs()
+        self.connect_signals()
+        
+    def connect_signals(self):
+        """连接所有信号"""
+        try:
+            # 连接设备选择信号
+            self.device_tab.device_selected.connect(self.on_device_selected)
+            logger.info("设备选择信号已连接到主窗口")
+            
+            # 连接平台切换信号
+            self.platform_tab.platform_changed.connect(self.device_tab.set_platform)
+            logger.info("平台切换信号已连接")
+            
+            # 连接标签页切换信号
+            self.tabs.currentChanged.connect(self.on_tab_changed)
+            logger.info("标签页切换信号已连接")
+            
+        except Exception as e:
+            logger.error(f"连接信号失败: {e}")
+            QMessageBox.critical(self, "错误", f"连接信号失败: {e}")
+    
+    def init_ui(self):
+        """初始化UI"""
+        self.setWindowTitle('App自动化工具')
+        self.setMinimumSize(800, 600)
         
         # 设置应用图标
         self.setWindowIcon(QIcon('resources/icon.png'))
-        
-        # 加载配置
-        try:
-            config_path = os.path.join('config', 'config.yaml')
-            self.config = load_config(config_path)
-            logger.info("配置加载成功")
-        except Exception as e:
-            logger.error(f"加载配置文件失败: {e}")
-            QMessageBox.critical(self, "错误", f"加载配置文件失败: {e}")
-            self.config = {}
-        
-        # 检查环境
-        try:
-            check_result = check_environment(self.config)
-            if not all(check_result.values()):
-                missing = [k for k, v in check_result.items() if not v]
-                QMessageBox.warning(
-                    self,
-                    "环境检查",
-                    f"以下组件未安装或配置不正确：\n{', '.join(missing)}\n\n请检查环境配置。"
-                )
-        except Exception as e:
-            logger.error(f"环境检查失败: {e}")
-            QMessageBox.warning(self, "警告", f"环境检查失败: {e}")
         
         # 创建主窗口部件
         main_widget = QWidget()
@@ -70,9 +73,6 @@ class MainWindow(QMainWindow):
         # 创建选项卡
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
-        
-        # 初始化各个选项卡
-        self.init_tabs()
         
         # 设置样式
         self.set_style()
@@ -113,11 +113,6 @@ class MainWindow(QMainWindow):
             self.report_tab = ReportTab(self.config)
             self.tabs.addTab(self.report_tab, "测试报告")
             
-            # 连接信号
-            self.platform_tab.platform_changed.connect(self.device_tab.set_platform)
-            self.device_tab.device_selected.connect(self.on_device_selected)
-            self.tabs.currentChanged.connect(self.on_tab_changed)
-            
             logger.info("所有选项卡初始化完成")
         
         except Exception as e:
@@ -144,16 +139,43 @@ class MainWindow(QMainWindow):
         :param device_info: 设备信息
         """
         try:
-            # 更新各个选项卡的设备信息
-            self.record_tab.set_device(device_info)
-            self.assert_tab.set_device(device_info)
-            self.testcase_tab.set_device(device_info)
+            logger.debug(f"主窗口收到设备选择信号，设备信息: {device_info}")
             
-            logger.info(f"设备已选择: {device_info}")
+            # 保存当前设备信息
+            self.current_device = device_info.copy()
+            logger.debug("已保存当前设备信息")
+            
+            # 更新各个选项卡的设备信息
+            logger.debug("开始更新各选项卡的设备信息")
+            
+            try:
+                logger.debug("更新录制标签页")
+                self.record_tab.set_device(device_info)
+            except Exception as e:
+                logger.error(f"更新录制标签页失败: {e}")
+            
+            try:
+                logger.debug("更新断言标签页")
+                self.assert_tab.set_device(device_info)
+            except Exception as e:
+                logger.error(f"更新断言标签页失败: {e}")
+            
+            try:
+                logger.debug("更新测试用例标签页")
+                self.testcase_tab.set_device(device_info)
+            except Exception as e:
+                logger.error(f"更新测试用例标签页失败: {e}")
+            
+            logger.info(f"设备信息更新完成: {device_info}")
         
         except Exception as e:
-            logger.error(f"设置设备信息失败: {e}")
-            QMessageBox.warning(self, "警告", f"设置设备信息失败: {e}")
+            logger.error(f"处理设备选择事件失败: {e}")
+            QMessageBox.warning(
+                self,
+                "警告",
+                f"设置设备信息失败: {e}",
+                QMessageBox.StandardButton.Ok
+            )
     
     def on_tab_changed(self, index: int):
         """
@@ -252,6 +274,16 @@ def main():
         # 创建应用程序实例
         app = QApplication(sys.argv)
         
+        # 加载配置
+        try:
+            config_path = os.path.join(os.path.dirname(__file__), 'config', 'config.yaml')
+            config = load_config(config_path)
+            logger.info("配置加载成功")
+        except Exception as e:
+            logger.error(f"加载配置失败: {e}")
+            QMessageBox.critical(None, "错误", f"加载配置失败: {e}")
+            return
+        
         # 设置应用程序样式
         app.setStyle('Fusion')
         
@@ -265,7 +297,7 @@ def main():
                 QTimer.singleShot(20, lambda: None)
         
         # 创建主窗口
-        window = MainWindow()
+        window = MainWindow(config)
         
         # 关闭启动画面
         if splash:

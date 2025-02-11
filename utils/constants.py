@@ -40,6 +40,18 @@ class Platform(Enum):
     ANDROID = auto()
     IOS = auto()
 
+class ActionType(Enum):
+    """动作类型枚举。"""
+    CLICK = auto()
+    INPUT = auto()
+    SWIPE = auto()
+    STATE_CHANGE = auto()
+    WAIT = auto()
+    BACK = auto()
+    HOME = auto()
+    APP_SWITCH = auto()
+    CUSTOM = auto()
+
 class DeviceStatus(Enum):
     """设备状态枚举。"""
     DISCONNECTED = auto()
@@ -73,6 +85,7 @@ class LogLevel(Enum):
     ERROR = "ERROR"
 
 # 超时设置
+DEFAULT_WAIT_TIMEOUT = 20  # 秒
 DEFAULT_DEVICE_TIMEOUT = 30  # 秒
 DEFAULT_COMMAND_TIMEOUT = 60  # 秒
 DEFAULT_CONNECTION_TIMEOUT = 10  # 秒

@@ -16,6 +16,7 @@ import datetime
 import time
 from typing import Dict, List, Optional, Union
 from loguru import logger
+from shutil import which
 
 from .constants import (
     ROOT_DIR, CONFIG_DIR, LOGS_DIR, RECORDINGS_DIR,
@@ -27,65 +28,99 @@ from .errors import (
     ValidationError
 )
 
-def check_environment(config: Dict) -> Dict[str, bool]:
+def check_environment(config: dict = None) -> list:
+    """检查环境配置
+    
+    Args:
+        config: 配置字典
+        
+    Returns:
+        缺失组件的列表
     """
-    检查运行环境
-    :param config: 配置信息
-    :return: 环境检查结果
-    """
-    results = {
-        'node': False,
-        'npm': False,
-        'appium': False,
-        'adb': False,
-        'tidevice': False
-    }
+    import subprocess
+    import platform
+    import os
+    
+    missing_components = []
     
     try:
         # 检查Node.js
         try:
-            node_version = subprocess.check_output('node -v', stderr=subprocess.STDOUT, shell=True)
-            results['node'] = True
-            logger.info(f"Node.js版本: {node_version.decode().strip()}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Node.js检查失败: {e.output.decode().strip()}")
+            # 使用 where/which 命令找到可执行文件的完整路径
+            node_path = which('node')
+            if node_path:
+                subprocess.check_output([node_path, '--version'], shell=True)
+            else:
+                missing_components.append('Node.js')
+        except Exception:
+            missing_components.append('Node.js')
         
         # 检查npm
         try:
-            npm_version = subprocess.check_output('npm -v', stderr=subprocess.STDOUT, shell=True)
-            results['npm'] = True
-            logger.info(f"npm版本: {npm_version.decode().strip()}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"npm检查失败: {e.output.decode().strip()}")
+            npm_path = which('npm')
+            if npm_path:
+                subprocess.check_output([npm_path, '--version'], shell=True)
+            else:
+                missing_components.append('npm')
+        except Exception:
+            missing_components.append('npm')
         
         # 检查Appium
         try:
-            appium_version = subprocess.check_output('appium -v', stderr=subprocess.STDOUT, shell=True)
-            results['appium'] = True
-            logger.info(f"Appium版本: {appium_version.decode().strip()}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Appium检查失败: {e.output.decode().strip()}")
+            # 首先检查全局安装的appium
+            appium_path = which('appium')
+            if appium_path:
+                subprocess.check_output([appium_path, '--version'], shell=True)
+            else:
+                # 如果全局未找到，检查本地安装的appium
+                npm_path = which('npm')
+                if npm_path:
+                    try:
+                        subprocess.check_output(['npm', 'list', '-g', 'appium'], shell=True)
+                    except subprocess.CalledProcessError:
+                        missing_components.append('Appium')
+                else:
+                    missing_components.append('Appium')
+        except Exception:
+            missing_components.append('Appium')
         
         # 检查adb
         try:
-            adb_version = subprocess.check_output('adb version', stderr=subprocess.STDOUT, shell=True)
-            results['adb'] = True
-            logger.info(f"ADB版本: {adb_version.decode().strip()}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"ADB检查失败: {e.output.decode().strip()}")
-
-        # 检查tidevice
-        try:
-            tidevice_version = subprocess.check_output('tidevice version', stderr=subprocess.STDOUT, shell=True)
-            results['tidevice'] = True
-            logger.info(f"tidevice版本: {tidevice_version.decode().strip()}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"tidevice检查失败: {e.output.decode().strip()}")
-    
+            adb_path = which('adb')
+            if adb_path:
+                subprocess.check_output([adb_path, 'version'], shell=True)
+            else:
+                missing_components.append('adb')
+        except Exception:
+            missing_components.append('adb')
+        
+        # 检查Android环境变量
+        android_home = os.environ.get('ANDROID_HOME')
+        if not android_home or not os.path.exists(android_home):
+            # 尝试检查ANDROID_SDK_ROOT
+            android_sdk_root = os.environ.get('ANDROID_SDK_ROOT')
+            if not android_sdk_root or not os.path.exists(android_sdk_root):
+                missing_components.append('ANDROID_HOME')
+        
+        # 检查Java环境变量
+        java_home = os.environ.get('JAVA_HOME')
+        if not java_home or not os.path.exists(java_home):
+            # 尝试直接检查java命令
+            if not which('java'):
+                missing_components.append('JAVA_HOME')
+        
+        # 在macOS上检查Xcode
+        if platform.system() == 'Darwin':
+            try:
+                subprocess.check_output(['xcode-select', '-p'])
+            except Exception:
+                missing_components.append('Xcode')
+        
+        return missing_components
+        
     except Exception as e:
         logger.error(f"环境检查失败: {e}")
-    
-    return results
+        return ['检查失败']
 
 def load_config(config_path: str) -> Dict:
     """
@@ -685,4 +720,19 @@ def wait_for_port_release(port: int, timeout: int = 30) -> bool:
         if not check_port_in_use(port):
             return True
         time.sleep(1)
-    return False 
+    return False
+
+def format_size(size_in_bytes: int) -> str:
+    """格式化文件大小
+    
+    Args:
+        size_in_bytes: 字节大小
+        
+    Returns:
+        格式化后的大小字符串
+    """
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size_in_bytes < 1024:
+            return f"{size_in_bytes:.1f}{unit}"
+        size_in_bytes /= 1024
+    return f"{size_in_bytes:.1f}PB" 

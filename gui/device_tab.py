@@ -2,164 +2,136 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QTreeWidget, QTreeWidgetItem,
     QMessageBox, QProgressBar, QHeaderView, QTableWidget,
-    QTableWidgetItem, QSplitter, QStyle
+    QTableWidgetItem, QSplitter, QStyle, QMenu, QComboBox,
+    QSpacerItem, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QSize
-from PySide6.QtGui import QIcon, QColor, QPalette
+from PySide6.QtGui import QIcon, QColor, QPalette, QAction
 from loguru import logger
 from core.device_manager import DeviceManager
-from utils.helpers import get_free_port
+from utils.helpers import get_free_port, format_size, format_time
 import time
 import threading
+import asyncio
+import os
 
 class DeviceTab(QWidget):
     # 定义信号
-    device_selected = Signal(dict)
+    device_selected = Signal(dict)  # 设备选择信号
+    device_disconnected = Signal(str)  # 设备断开信号
+    device_status_changed = Signal(dict)  # 设备状态变化信号
     
     def __init__(self, config, parent=None):
+        """初始化设备标签页
+        
+        Args:
+            config: 配置字典
+            parent: 父窗口
+        """
         super().__init__(parent)
         self.setObjectName("device_tab")
+        
+        # 初始化成员变量
         self.config = config
-        self.device_manager = None
-        self.connected_devices = {}  # 存储已连接的设备信息
-        self.current_platform = 'android'
-        self.connection_lock = threading.Lock()  # 添加连接状态锁
-        self.init_device_manager()
+        self.device_manager = DeviceManager(config)
+        self.current_platform = "android"
+        self.devices_tree = None
+        self.appium_table = None
+        self.refresh_timer = None
+        self.refresh_interval = 5000  # 刷新间隔（毫秒）
+        self._selected_device = None
+        
+        # 初始化按钮引用
+        self.refresh_btn = None
+        self.start_btn = None
+        self.stop_btn = None
+        
+        # 初始化UI
         self.init_ui()
         
-        # 启动定时刷新（10秒刷新一次设备列表）
-        self.refresh_timer = QTimer()
-        self.refresh_timer.timeout.connect(self.refresh_devices)
-        self.refresh_timer.start(10000)
-        
-        # 启动Appium服务状态刷新（3秒刷新一次）
-        self.appium_status_timer = QTimer()
-        self.appium_status_timer.timeout.connect(self.refresh_appium_status)
-        self.appium_status_timer.start(3000)
+        logger.info("设备标签页初始化完成")
     
     def init_ui(self):
         """初始化UI"""
         main_layout = QVBoxLayout()
         main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 10, 10, 10)
         
-        # 创建分割器
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setChildrenCollapsible(False)
+        # 创建工具栏
+        toolbar_layout = QHBoxLayout()
         
-        # 设备列表区域
+        # 刷新按钮
+        self.refresh_btn = QPushButton("刷新")
+        self.refresh_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self.refresh_btn.clicked.connect(self.refresh_devices)
+        toolbar_layout.addWidget(self.refresh_btn)
+        
+        # 启动服务按钮
+        self.start_btn = QPushButton("启动服务")
+        self.start_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.start_btn.clicked.connect(self.start_all_appium_servers)
+        toolbar_layout.addWidget(self.start_btn)
+        
+        # 停止服务按钮
+        self.stop_btn = QPushButton("停止服务")
+        self.stop_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+        self.stop_btn.clicked.connect(self.stop_all_appium_servers)
+        toolbar_layout.addWidget(self.stop_btn)
+        
+        # 添加弹性空间
+        toolbar_layout.addStretch()
+        
+        main_layout.addLayout(toolbar_layout)
+        
+        # 创建设备列表区域
         device_frame = self._create_device_frame()
-        splitter.addWidget(device_frame)
+        main_layout.addWidget(device_frame)
         
-        # Appium服务管理区域
+        # 创建Appium服务区域
         appium_frame = self._create_appium_frame()
-        splitter.addWidget(appium_frame)
+        main_layout.addWidget(appium_frame)
         
-        # 设置分割器比例
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-        
-        main_layout.addWidget(splitter)
         self.setLayout(main_layout)
+        
+        # 启动刷新定时器
+        self._start_refresh_timer()
     
     def _create_device_frame(self):
         """创建设备列表区域"""
         frame = QFrame()
         frame.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
-        frame.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 1px solid #dcdcdc;
-                border-radius: 4px;
-            }
-        """)
         
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         
-        # 标题和刷新按钮
-        header_layout = QHBoxLayout()
-        title = QLabel("设备管理")
-        title.setStyleSheet("""
-            QLabel {
-                font-size: 16px;
-                font-weight: bold;
-                color: #333333;
-            }
-        """)
+        # 标题
+        title = QLabel("设备列表")
+        title.setObjectName("title")
+        layout.addWidget(title)
         
-        refresh_btn = QPushButton("刷新设备列表")
-        refresh_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        refresh_btn.setStyleSheet("""
-            QPushButton {
-                padding: 5px 15px;
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: 3px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
-        refresh_btn.clicked.connect(self.refresh_devices)
-        
-        header_layout.addWidget(title)
-        header_layout.addStretch()
-        header_layout.addWidget(refresh_btn)
-        layout.addLayout(header_layout)
-        
-        # 设备列表
-        self.device_tree = QTreeWidget()
-        self.device_tree.setHeaderLabels(["", "设备ID", "型号", "系统版本", "状态", "操作"])
-        self.device_tree.setAlternatingRowColors(True)
-        self.device_tree.setStyleSheet("""
-            QTreeWidget {
-                border: 1px solid #dcdcdc;
-                border-radius: 4px;
-                background-color: #ffffff;
-            }
-            QTreeWidget::item {
-                padding: 8px 4px;
-                border-bottom: 1px solid #f0f0f0;
-            }
-            QTreeWidget::item:selected {
-                background-color: #e3f2fd;
-                color: #1976d2;
-            }
-            QTreeWidget::item:hover {
-                background-color: #f5f5f5;
-            }
-            QHeaderView::section {
-                background-color: #f8f9fa;
-                padding: 8px;
-                border: none;
-                border-right: 1px solid #dcdcdc;
-                border-bottom: 1px solid #dcdcdc;
-                font-weight: bold;
-            }
-        """)
+        # 设备树形列表
+        self.devices_tree = QTreeWidget()
+        self.devices_tree.setHeaderLabels([
+            "设备ID", "型号", "系统版本", "状态",
+            "电池", "内存", "存储"
+        ])
+        self.devices_tree.setAlternatingRowColors(True)
+        self.devices_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.devices_tree.customContextMenuRequested.connect(self._show_device_context_menu)
+        self.devices_tree.itemSelectionChanged.connect(self._on_device_selected)
         
         # 设置列宽
-        header = self.device_tree.header()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)  # 复选框列
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header = self.devices_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         
-        # 设置最小列宽
-        self.device_tree.setColumnWidth(0, 30)  # 复选框列
-        self.device_tree.setColumnWidth(3, 100)  # 系统版本列
-        self.device_tree.setColumnWidth(4, 80)   # 状态列
-        self.device_tree.setColumnWidth(5, 100)  # 操作列
-        
-        layout.addWidget(self.device_tree)
+        layout.addWidget(self.devices_tree)
         frame.setLayout(layout)
         return frame
     
@@ -167,444 +139,616 @@ class DeviceTab(QWidget):
         """创建Appium服务管理区域"""
         frame = QFrame()
         frame.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
-        frame.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 1px solid #dcdcdc;
-                border-radius: 4px;
-            }
-        """)
         
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         
-        # 标题和关闭按钮
-        header_layout = QHBoxLayout()
-        title = QLabel("Appium服务管理")
-        title.setStyleSheet("""
-            QLabel {
-                font-size: 16px;
-                font-weight: bold;
-                color: #333333;
-            }
-        """)
+        # 标题
+        title = QLabel("Appium服务")
+        title.setObjectName("title")
+        layout.addWidget(title)
         
-        stop_all_btn = QPushButton("关闭所有服务")
-        stop_all_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserStop))
-        stop_all_btn.setStyleSheet("""
-            QPushButton {
-                padding: 5px 15px;
-                background-color: #f44336;
-                color: white;
-                border: none;
-                border-radius: 3px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #e53935;
-            }
-            QPushButton:pressed {
-                background-color: #d32f2f;
-            }
-        """)
-        stop_all_btn.clicked.connect(self.stop_all_appium_servers)
-        
-        header_layout.addWidget(title)
-        header_layout.addStretch()
-        header_layout.addWidget(stop_all_btn)
-        layout.addLayout(header_layout)
-        
-        # Appium服务列表
+        # Appium服务表格
         self.appium_table = QTableWidget()
         self.appium_table.setColumnCount(4)
-        self.appium_table.setHorizontalHeaderLabels(["主机", "端口", "运行时间", "状态"])
+        self.appium_table.setHorizontalHeaderLabels([
+            "主机", "端口", "运行时间", "状态"
+        ])
         self.appium_table.setAlternatingRowColors(True)
-        self.appium_table.setStyleSheet("""
-            QTableWidget {
-                border: 1px solid #dcdcdc;
-                border-radius: 4px;
-                background-color: #ffffff;
-            }
-            QTableWidget::item {
-                padding: 8px 4px;
-                border-bottom: 1px solid #f0f0f0;
-            }
-            QTableWidget::item:selected {
-                background-color: #e3f2fd;
-                color: #1976d2;
-            }
-            QHeaderView::section {
-                background-color: #f8f9fa;
-                padding: 8px;
-                border: none;
-                border-right: 1px solid #dcdcdc;
-                border-bottom: 1px solid #dcdcdc;
-                font-weight: bold;
-            }
-        """)
+        self.appium_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.appium_table.customContextMenuRequested.connect(self._show_appium_context_menu)
         
         # 设置列宽
         header = self.appium_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        
-        # 设置最小列宽
-        self.appium_table.setColumnWidth(1, 80)   # 端口列
-        self.appium_table.setColumnWidth(2, 100)  # 运行时间列
-        self.appium_table.setColumnWidth(3, 80)   # 状态列
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         
         layout.addWidget(self.appium_table)
         frame.setLayout(layout)
         return frame
     
+    def _show_device_context_menu(self, pos):
+        """显示设备右键菜单"""
+        try:
+            item = self.devices_tree.itemAt(pos)
+            if not item:
+                return
+            
+            # 创建右键菜单
+            self.context_menu = QMenu(self)
+            
+            # 连接设备
+            connect_action = QAction("连接设备", self)
+            connect_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
+            connect_action.triggered.connect(lambda: self._connect_device(item))
+            self.context_menu.addAction(connect_action)
+            
+            # 断开设备
+            disconnect_action = QAction("断开设备", self)
+            disconnect_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton))
+            disconnect_action.triggered.connect(lambda: self._disconnect_device(item))
+            self.context_menu.addAction(disconnect_action)
+            
+            self.context_menu.addSeparator()
+            
+            # 启动Appium服务
+            start_appium_action = QAction("启动Appium服务", self)
+            start_appium_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+            start_appium_action.triggered.connect(lambda: self._start_appium_for_device(item))
+            self.context_menu.addAction(start_appium_action)
+            
+            # 停止Appium服务
+            stop_appium_action = QAction("停止Appium服务", self)
+            stop_appium_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+            stop_appium_action.triggered.connect(lambda: self._stop_appium_for_device(item))
+            self.context_menu.addAction(stop_appium_action)
+            
+            self.context_menu.addSeparator()
+            
+            # 刷新设备信息
+            refresh_action = QAction("刷新设备信息", self)
+            refresh_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+            refresh_action.triggered.connect(lambda: self._refresh_device(item))
+            self.context_menu.addAction(refresh_action)
+            
+            # 更新菜单项状态
+            self._update_button_states()
+            
+            # 显示菜单
+            self.context_menu.exec_(self.devices_tree.viewport().mapToGlobal(pos))
+        
+        except Exception as e:
+            logger.error(f"显示右键菜单失败: {e}")
+            self._show_error("错误", f"显示右键菜单失败: {e}")
+    
+    def _show_appium_context_menu(self, pos):
+        """显示Appium服务右键菜单"""
+        item = self.appium_table.itemAt(pos)
+        if not item:
+            return
+        
+        menu = QMenu(self)
+        
+        # 停止服务
+        stop_action = QAction("停止服务", self)
+        stop_action.triggered.connect(lambda: self._stop_appium_server(item.row()))
+        menu.addAction(stop_action)
+        
+        # 重启服务
+        restart_action = QAction("重启服务", self)
+        restart_action.triggered.connect(lambda: self._restart_appium_server(item.row()))
+        menu.addAction(restart_action)
+        
+        menu.addSeparator()
+        
+        # 查看日志
+        view_log_action = QAction("查看日志", self)
+        view_log_action.triggered.connect(lambda: self._view_appium_log(item.row()))
+        menu.addAction(view_log_action)
+        
+        menu.exec_(self.appium_table.viewport().mapToGlobal(pos))
+    
+    def _on_device_selected(self):
+        """设备选择处理"""
+        try:
+            items = self.devices_tree.selectedItems()
+            if not items:
+                return
+            
+            item = items[0]
+            device_id = item.text(0)
+            device_info = self.device_manager.get_device_info(device_id)
+            
+            if device_info:
+                self._selected_device = device_info
+                self.device_selected.emit(device_info)
+                logger.debug(f"已选择设备: {device_id}")
+        
+        except Exception as e:
+            logger.error(f"设备选择处理失败: {e}")
+    
     def refresh_devices(self):
         """刷新设备列表"""
         try:
-            self.device_tree.clear()
-            self.devices = self.device_manager.get_devices()  # 保存设备列表到实例变量
+            # 显示加载状态
+            self.refresh_btn.setEnabled(False)
+            self.refresh_btn.setText("正在刷新...")
             
-            for device in self.devices:
-                item = QTreeWidgetItem()
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.CheckState.Unchecked)
+            # 清空设备列表
+            self.devices_tree.clear()
                 
-                device_id = device['id']
-                # 设置设备信息
-                item.setText(1, device_id)
-                item.setText(2, device.get('model', 'Unknown'))
-                item.setText(3, device.get('platform_version', 'Unknown'))
+            # 获取设备列表
+            devices = self.device_manager.get_devices()
+            
+            # 添加设备到树形列表
+            for device in devices:
+                item = QTreeWidgetItem(self.devices_tree)
+                item.setText(0, device['id'])
+                item.setText(1, device.get('model', 'unknown'))
+                item.setText(2, device.get('platform_version', 'unknown'))
+                item.setText(3, device.get('status', 'unknown'))
+                item.setText(4, device.get('battery', 'unknown'))
+                item.setText(5, device.get('memory', 'unknown'))
                 
-                # 检查设备是否已连接到Appium
-                is_connected = device_id in self.connected_devices
-                status = "已连接到Appium" if is_connected else "未连接"
-                item.setText(4, status)
+                # 格式化存储信息显示
+                storage = device.get('storage', {})
+                if isinstance(storage, dict):
+                    storage_text = (
+                        f"总共: {storage.get('total', 'unknown')} | "
+                        f"已用: {storage.get('used', 'unknown')} | "
+                        f"可用: {storage.get('free', 'unknown')}"
+                    )
+                else:
+                    storage_text = str(storage)
+                item.setText(6, storage_text)
                 
-                # 设置状态颜色
-                status_color = QColor("#4CAF50") if is_connected else QColor("#f44336")
-                item.setForeground(4, status_color)
+                # 设置状态颜色和图标
+                status = device.get('status', '').lower()
+                if status == 'connected':
+                    item.setForeground(3, QColor('#4CAF50'))  # 绿色
+                    item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
+                elif status == 'disconnected':
+                    item.setForeground(3, QColor('#F44336'))  # 红色
+                    item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxCritical))
+                elif status == 'error':
+                    item.setForeground(3, QColor('#FF9800'))  # 橙色
+                    item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning))
                 
-                # 如果设备已连接，自动勾选
-                if is_connected:
-                    item.setCheckState(0, Qt.CheckState.Checked)
-                
-                # 添加操作按钮
-                btn_text = "断开Appium" if is_connected else "连接到Appium"
-                btn_style = """
-                    QPushButton {
-                        padding: 3px 12px;
-                        background-color: %s;
-                        color: white;
-                        border: none;
-                        border-radius: 2px;
-                        min-width: 80px;
-                        font-weight: bold;
-                    }
-                    QPushButton:hover {
-                        background-color: %s;
-                    }
-                    QPushButton:pressed {
-                        background-color: %s;
-                    }
-                """ % (
-                    ('#f44336' if is_connected else '#4CAF50'),
-                    ('#e53935' if is_connected else '#45a049'),
-                    ('#d32f2f' if is_connected else '#3d8b40')
+                # 设置提示信息
+                tooltip = (
+                    f"设备ID: {device['id']}\n"
+                    f"型号: {device.get('model', 'unknown')}\n"
+                    f"系统版本: {device.get('platform_version', 'unknown')}\n"
+                    f"状态: {device.get('status', 'unknown')}"
                 )
+                for i in range(self.devices_tree.columnCount()):
+                    item.setToolTip(i, tooltip)
                 
-                connect_button = QPushButton(btn_text)
-                connect_button.setStyleSheet(btn_style)
-                connect_button.clicked.connect(lambda checked, d=device: self.toggle_device_connection(d))
-                
-                self.device_tree.addTopLevelItem(item)
-                self.device_tree.setItemWidget(item, 5, connect_button)
+                # 如果是当前选中的设备，保持选中状态
+                if (self._selected_device and 
+                    self._selected_device.get('id') == device['id']):
+                    item.setSelected(True)
             
-            logger.info(f"设备列表已刷新，共发现 {len(self.devices)} 个设备")
+            # 恢复按钮状态
+            self.refresh_btn.setEnabled(True)
+            self.refresh_btn.setText("刷新")
+            
+            # 更新按钮状态
+            self._update_button_states()
+            
+            logger.info(f"设备列表刷新完成，共 {len(devices)} 个设备")
+        
         except Exception as e:
             logger.error(f"刷新设备列表失败: {e}")
-            QMessageBox.critical(self, "错误", f"刷新设备列表失败: {str(e)}")
+            self._show_error("错误", f"刷新设备列表失败: {e}")
+            
+            # 恢复按钮状态
+            self.refresh_btn.setEnabled(True)
+            self.refresh_btn.setText("刷新")
+    
+    def _update_button_states(self):
+        """更新按钮状态"""
+        try:
+            # 获取选中的设备
+            selected_items = self.devices_tree.selectedItems()
+            has_selection = len(selected_items) > 0
+            
+            # 获取设备和服务状态
+            devices = self.device_manager.get_devices()
+            servers = self.device_manager.get_appium_servers()
+            
+            connected_devices = sum(1 for d in devices if d.get('status', '').lower() == 'connected')
+            running_servers = len(servers)
+            
+            # 更新启动服务按钮状态
+            self.start_btn.setEnabled(connected_devices > 0 and running_servers < connected_devices)
+            
+            # 更新停止服务按钮状态
+            self.stop_btn.setEnabled(running_servers > 0)
+            
+            # 更新右键菜单状态
+            if hasattr(self, 'context_menu'):
+                for action in self.context_menu.actions():
+                    if action.text() in ['连接设备', '断开设备', '刷新设备信息']:
+                        action.setEnabled(has_selection)
+                    elif action.text() == '启动Appium服务':
+                        action.setEnabled(has_selection and running_servers < connected_devices)
+                    elif action.text() == '停止Appium服务':
+                        action.setEnabled(has_selection and running_servers > 0)
+        
+        except Exception as e:
+            logger.error(f"更新按钮状态失败: {e}")
     
     def refresh_appium_status(self):
         """刷新Appium服务状态"""
         try:
+            # 获取服务列表
             servers = self.device_manager.get_appium_servers()
+            
+            # 更新表格
             self.appium_table.setRowCount(len(servers))
             
-            current_time = time.time()
-            for i, server in enumerate(servers):
-                # 设置表格项
-                host_item = QTableWidgetItem(server['host'])
-                port_item = QTableWidgetItem(str(server['port']))
+            for row, server in enumerate(servers):
+                # 主机
+                host_item = QTableWidgetItem(server.get('host', 'unknown'))
+                self.appium_table.setItem(row, 0, host_item)
                 
-                # 计算运行时间
-                start_time = server.get('start_time', current_time)
-                running_time = current_time - start_time
-                if running_time < 60:
-                    time_str = f"{int(running_time)}秒"
-                elif running_time < 3600:
-                    time_str = f"{int(running_time / 60)}分钟"
-                else:
-                    time_str = f"{int(running_time / 3600)}小时{int((running_time % 3600) / 60)}分钟"
+                # 端口
+                port_item = QTableWidgetItem(str(server.get('port', 'unknown')))
+                self.appium_table.setItem(row, 1, port_item)
                 
-                time_item = QTableWidgetItem(time_str)
-                status_item = QTableWidgetItem(server['status'])
+                # 运行时间
+                uptime = format_time(server.get('uptime', 0))
+                uptime_item = QTableWidgetItem(uptime)
+                self.appium_table.setItem(row, 2, uptime_item)
                 
-                # 设置状态颜色
-                status_color = QColor("#4CAF50") if server['status'] == 'running' else QColor("#f44336")
-                status_item.setForeground(status_color)
-                
-                # 设置为只读
-                for item in (host_item, port_item, time_item, status_item):
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                
-                self.appium_table.setItem(i, 0, host_item)
-                self.appium_table.setItem(i, 1, port_item)
-                self.appium_table.setItem(i, 2, time_item)
-                self.appium_table.setItem(i, 3, status_item)
+                # 状态
+                status = "运行中"
+                status_item = QTableWidgetItem(status)
+                status_item.setForeground(QColor('#4CAF50'))  # 绿色
+                self.appium_table.setItem(row, 3, status_item)
+            
+            logger.debug(f"Appium服务状态刷新完成，共 {len(servers)} 个服务")
+            
+            # 更新按钮状态
+            has_servers = len(servers) > 0
+            self.stop_btn.setEnabled(has_servers)
+        
         except Exception as e:
             logger.error(f"刷新Appium服务状态失败: {e}")
+            self._show_error("错误", f"刷新Appium服务状态失败: {e}")
     
-    def toggle_device_connection(self, device: dict):
-        """切换设备连接状态"""
-        try:
-            device_id = device['id']
-            logger.debug(f"切换设备 {device_id} 的连接状态")
-            logger.debug(f"当前设备信息: {device}")
-            logger.debug(f"已连接设备列表: {self.connected_devices}")
-            
-            if device_id in self.connected_devices:
-                logger.debug(f"设备 {device_id} 已连接，准备断开连接")
-                self.disconnect_device(device_id)
-            else:
-                logger.debug(f"设备 {device_id} 未连接，准备连接")
-                self.connect_device(device)
-            self.refresh_devices()
-        except Exception as e:
-            logger.error(f"切换设备连接状态失败: {e}")
-            QMessageBox.critical(self, "错误", f"切换设备连接状态失败: {str(e)}")
-    
-    def connect_device(self, device: dict):
+    def _connect_device(self, item):
         """连接设备"""
         try:
-            device_id = device['id']
-            logger.debug(f"开始连接设备: {device_id}")
-            
-            # 使用锁确保线程安全
-            with self.connection_lock:
-                # 检查设备是否已连接
-                if device_id in self.connected_devices:
-                    msg = QMessageBox()
-                    msg.setParent(self)  # 设置父窗口
-                    msg.setIcon(QMessageBox.Icon.Warning)
-                    msg.setWindowTitle("警告")
-                    msg.setText(f"设备 {device_id} 已连接")
-                    msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-                    msg.setWindowModality(Qt.WindowModality.NonModal)
-                    msg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # 关闭时自动删除
-                    msg.show()
-                    return
-                
-                # 获取空闲端口
-                port = get_free_port()
-                if not port:
-                    msg = QMessageBox()
-                    msg.setParent(self)
-                    msg.setIcon(QMessageBox.Icon.Critical)
-                    msg.setWindowTitle("错误")
-                    msg.setText("无法获取可用端口")
-                    msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-                    msg.setWindowModality(Qt.WindowModality.NonModal)
-                    msg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-                    msg.show()
-                    return
-                
-                logger.debug(f"获取到空闲端口: {port}")
-                
-                # 启动Appium服务
-                logger.debug(f"正在启动Appium服务，端口: {port}")
-                if not self.device_manager._start_appium_server_internal('127.0.0.1', port):
-                    msg = QMessageBox()
-                    msg.setParent(self)
-                    msg.setIcon(QMessageBox.Icon.Critical)
-                    msg.setWindowTitle("错误")
-                    msg.setText(f"启动Appium服务失败，端口: {port}")
-                    msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-                    msg.setWindowModality(Qt.WindowModality.NonModal)
-                    msg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-                    msg.show()
-                    return
-                
-                logger.debug(f"Appium服务启动成功，端口: {port}")
-                
-                # 更新连接状态
-                self.connected_devices[device_id] = {
-                    'port': port,
-                    'status': 'connected',
-                    'connect_time': time.time()
-                }
-                
-                # 立即更新UI
-                self.refresh_devices()
-                self.refresh_appium_status()
-                
-                # 发送设备选择信号
-                self.device_selected.emit(device)
-                
-                # 显示连接成功提示（使用非模态对话框）
-                success_msg = QMessageBox()
-                success_msg.setParent(self)
-                success_msg.setIcon(QMessageBox.Icon.Information)
-                success_msg.setWindowTitle("连接成功")
-                success_msg.setText(f"设备 {device_id} 已成功连接到Appium服务")
-                success_msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-                success_msg.setWindowModality(Qt.WindowModality.NonModal)
-                success_msg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-                
-                # 设置定时自动关闭（3秒）
-                QTimer.singleShot(3000, success_msg.close)
-                success_msg.show()
-                
-                logger.info(f"设备 {device_id} 已连接到Appium服务，使用端口 {port}")
-        
+            device_id = item.text(0)
+            asyncio.create_task(self.device_manager.connect_device(device_id))
+            logger.info(f"正在连接设备: {device_id}")
         except Exception as e:
             logger.error(f"连接设备失败: {e}")
-            msg = QMessageBox()
-            msg.setParent(self)
-            msg.setIcon(QMessageBox.Icon.Critical)
-            msg.setWindowTitle("错误")
-            msg.setText(f"连接设备失败: {str(e)}")
-            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-            msg.setWindowModality(Qt.WindowModality.NonModal)
-            msg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-            msg.show()
-            # 确保清理资源
-            if 'port' in locals():
-                self.device_manager.stop_appium_server(port)
+            self._show_error("错误", f"连接设备失败: {e}")
     
-    def disconnect_device(self, device_id: str):
+    def _disconnect_device(self, item):
         """断开设备连接"""
         try:
-            logger.debug(f"开始断开设备 {device_id} 的连接")
+            device_id = item.text(0)
+            asyncio.create_task(self.device_manager.disconnect_device(device_id))
+            logger.info(f"正在断开设备: {device_id}")
+        except Exception as e:
+            logger.error(f"断开设备失败: {e}")
+            self._show_error("错误", f"断开设备失败: {e}")
+    
+    def _start_appium_for_device(self, item):
+        """为设备启动Appium服务"""
+        try:
+            device_id = item.text(0)
+            port = get_free_port()
+            asyncio.create_task(
+                self.device_manager.start_appium_server_async(port=port)
+            )
+            logger.info(f"正在为设备 {device_id} 启动Appium服务")
+        except Exception as e:
+            logger.error(f"启动Appium服务失败: {e}")
+            self._show_error("错误", f"启动Appium服务失败: {e}")
+    
+    def _stop_appium_for_device(self, item):
+        """停止设备的Appium服务"""
+        try:
+            device_id = item.text(0)
+            device_info = self.device_manager.get_device_info(device_id)
+            if device_info and 'appium_port' in device_info:
+                port = device_info['appium_port']
+                asyncio.create_task(
+                    self.device_manager.stop_appium_server_async(port)
+                )
+                logger.info(f"正在停止设备 {device_id} 的Appium服务")
+        except Exception as e:
+            logger.error(f"停止Appium服务失败: {e}")
+            self._show_error("错误", f"停止Appium服务失败: {e}")
+    
+    def _refresh_device(self, item):
+        """刷新单个设备信息"""
+        try:
+            device_id = item.text(0)
+            device_info = self.device_manager.get_device_info(device_id)
+            if device_info:
+                self._update_device_item(item, device_info)
+                logger.info(f"设备 {device_id} 信息已刷新")
+        except Exception as e:
+            logger.error(f"刷新设备信息失败: {e}")
+            self._show_error("错误", f"刷新设备信息失败: {e}")
+    
+    def _update_device_item(self, item: QTreeWidgetItem, device_info: dict):
+        """更新设备列表项"""
+        try:
+            item.setText(1, device_info.get('model', 'unknown'))
+            item.setText(2, device_info.get('platform_version', 'unknown'))
+            item.setText(3, device_info.get('status', 'unknown'))
+            item.setText(4, device_info.get('battery', 'unknown'))
+            item.setText(5, device_info.get('memory', 'unknown'))
             
-            # 使用锁确保线程安全
-            with self.connection_lock:
-                # 检查设备是否在已连接列表中
-                if device_id not in self.connected_devices:
-                    logger.warning(f"设备 {device_id} 未连接")
-                    return
-                
-                # 获取设备信息
-                device_info = self.connected_devices[device_id]
-                port = device_info['port']
-                
-                logger.debug(f"设备当前使用的Appium端口: {port}")
-                
-                # 停止Appium服务
-                logger.debug(f"正在停止端口 {port} 的Appium服务")
-                self.device_manager.stop_appium_server(port)
-                
-                # 从已连接设备列表中移除
-                del self.connected_devices[device_id]
-                
-                # 立即更新UI
-                self.refresh_devices()
-                self.refresh_appium_status()
-                
-                logger.info(f"设备 {device_id} 已断开连接")
-                
-                # 显示断开成功提示
-                QMessageBox.information(self, "断开成功", f"设备 {device_id} 已断开连接")
+            storage = device_info.get('storage', {})
+            if isinstance(storage, dict):
+                storage_text = (
+                    f"总共: {storage.get('total', 'unknown')} | "
+                    f"已用: {storage.get('used', 'unknown')} | "
+                    f"可用: {storage.get('free', 'unknown')}"
+                )
+            else:
+                storage_text = str(storage)
+            item.setText(6, storage_text)
+            
+            # 更新状态颜色
+            status = device_info.get('status', '').lower()
+            if status == 'connected':
+                item.setForeground(3, QColor('#4CAF50'))
+            elif status == 'disconnected':
+                item.setForeground(3, QColor('#F44336'))
+            elif status == 'error':
+                item.setForeground(3, QColor('#FF9800'))
         
         except Exception as e:
-            logger.error(f"断开设备连接失败: {e}")
-            QMessageBox.critical(self, "错误", f"断开设备连接失败: {str(e)}")
+            logger.error(f"更新设备列表项失败: {e}")
     
-    def stop_all_appium_servers(self):
-        """关闭所有Appium服务"""
+    def _stop_appium_server(self, row: int):
+        """停止指定的Appium服务"""
         try:
-            if not self.connected_devices:
-                QMessageBox.information(self, "提示", "当前没有运行中的Appium服务")
+            port = int(self.appium_table.item(row, 1).text())
+            asyncio.create_task(
+                self.device_manager.stop_appium_server_async(port)
+            )
+            logger.info(f"正在停止端口 {port} 的Appium服务")
+        except Exception as e:
+            logger.error(f"停止Appium服务失败: {e}")
+            self._show_error("错误", f"停止Appium服务失败: {e}")
+    
+    def _restart_appium_server(self, row: int):
+        """重启指定的Appium服务"""
+        try:
+            port = int(self.appium_table.item(row, 1).text())
+            host = self.appium_table.item(row, 0).text()
+            
+            async def restart():
+                await self.device_manager.stop_appium_server_async(port)
+                await asyncio.sleep(1)
+                await self.device_manager.start_appium_server_async(
+                    host=host, port=port
+                )
+            
+            asyncio.create_task(restart())
+            logger.info(f"正在重启端口 {port} 的Appium服务")
+        
+        except Exception as e:
+            logger.error(f"重启Appium服务失败: {e}")
+            self._show_error("错误", f"重启Appium服务失败: {e}")
+    
+    def _view_appium_log(self, row: int):
+        """查看Appium服务日志"""
+        try:
+            port = self.appium_table.item(row, 1).text()
+            log_file = f"appium_{port}.log"
+            
+            if os.path.exists(log_file):
+                # TODO: 实现日志查看器
+                logger.info(f"查看日志文件: {log_file}")
+            else:
+                self._show_error("错误", f"日志文件不存在: {log_file}")
+        
+        except Exception as e:
+            logger.error(f"查看日志失败: {e}")
+            self._show_error("错误", f"查看日志失败: {e}")
+    
+    def start_all_appium_servers(self):
+        """启动所有Appium服务"""
+        try:
+            # 获取设备列表
+            devices = self.device_manager.get_devices()
+            if not devices:
+                self._show_error("错误", "没有可用的设备")
                 return
             
-            reply = QMessageBox.question(
-                self, "确认",
-                "确定要关闭所有Appium服务吗？\n这将断开所有已连接的设备。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
+            # 创建事件循环
+            loop = asyncio.new_event_loop()
             
-            if reply == QMessageBox.StandardButton.Yes:
-                # 显示进度
-                progress = QProgressBar(self)
-                progress.setRange(0, len(self.connected_devices))
-                progress.setValue(0)
-                progress.setStyleSheet("""
-                    QProgressBar {
-                        border: 1px solid #dcdcdc;
-                        border-radius: 2px;
-                        text-align: center;
-                    }
-                    QProgressBar::chunk {
-                        background-color: #f44336;
-                    }
-                """)
+            async def start_servers():
+                tasks = []
+                for device in devices:
+                    # 获取空闲端口
+                    port = get_free_port()
+                    if not port:
+                        logger.error("无法获取空闲端口")
+                        continue
+                    
+                    # 创建启动任务
+                    task = self.device_manager.start_appium_server_async(
+                        host='127.0.0.1',
+                        port=port
+                    )
+                    tasks.append(task)
                 
-                msg = QMessageBox(self)
-                msg.setIcon(QMessageBox.Icon.Information)
-                msg.setText("正在关闭所有Appium服务...")
-                msg.setStandardButtons(QMessageBox.StandardButton.NoButton)
-                layout = msg.layout()
-                layout.addWidget(progress, 1, 1)
-                msg.show()
-                
-                # 断开所有设备
-                for i, device_id in enumerate(list(self.connected_devices.keys())):
-                    self.disconnect_device(device_id)
-                    progress.setValue(i + 1)
-                
-                msg.close()
-                self.refresh_devices()
-                QMessageBox.information(self, "成功", "所有Appium服务已关闭")
+                # 等待所有任务完成
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    # 处理结果
+                    for i, result in enumerate(results):
+                        if isinstance(result, Exception):
+                            logger.error(f"启动Appium服务失败: {result}")
+                        elif not result:
+                            logger.error(f"启动Appium服务失败")
+                    
+                    # 在主线程中刷新服务状态
+                    QTimer.singleShot(0, self.refresh_appium_status)
+            
+            # 在新线程中运行事件循环
+            def run_async():
+                try:
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(start_servers())
+                except Exception as e:
+                    logger.error(f"启动Appium服务失败: {e}")
+                finally:
+                    loop.close()
+            
+            thread = threading.Thread(target=run_async)
+            thread.daemon = True  # 设置为守护线程
+            thread.start()
+            
         except Exception as e:
-            logger.error(f"关闭所有Appium服务失败: {e}")
-            QMessageBox.critical(self, "错误", f"关闭所有Appium服务失败: {str(e)}")
+            logger.error(f"启动所有Appium服务失败: {e}")
+            self._show_error("错误", f"启动所有Appium服务失败: {e}")
     
-    def set_platform(self, platform: str):
-        """设置平台类型"""
+    def stop_all_appium_servers(self):
+        """停止所有Appium服务"""
         try:
-            self.current_platform = platform
-            self.device_manager.set_platform(platform)
+            # 获取所有运行中的Appium服务
+            servers = self.device_manager.get_appium_servers()
+            if not servers:
+                logger.info("没有运行中的Appium服务")
+                return
+            
+            # 禁用按钮，避免重复点击
+            self.stop_btn.setEnabled(False)
+            self.start_btn.setEnabled(False)
+            
+            # 创建事件循环
+            loop = asyncio.new_event_loop()
+            
+            async def stop_servers():
+                try:
+                    tasks = []
+                    for server in servers:
+                        # 创建停止任务
+                        task = self.device_manager.stop_appium_server_async(
+                            server['port']
+                        )
+                        tasks.append(task)
+                    
+                    # 等待所有任务完成
+                    if tasks:
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        # 处理结果
+                        for i, result in enumerate(results):
+                            if isinstance(result, Exception):
+                                logger.error(f"停止Appium服务失败: {result}")
+                            elif not result:
+                                logger.error(f"停止Appium服务失败")
+                except Exception as e:
+                    logger.error(f"停止服务失败: {e}")
+                finally:
+                    # 使用QTimer在主线程中更新UI
+                    QTimer.singleShot(0, self._on_stop_servers_complete)
+            
+            # 在新线程中运行事件循环
+            def run_async():
+                try:
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(stop_servers())
+                except Exception as e:
+                    logger.error(f"停止Appium服务失败: {e}")
+                finally:
+                    loop.close()
+            
+            thread = threading.Thread(target=run_async)
+            thread.daemon = True  # 设置为守护线程
+            thread.start()
+            
+            logger.info("正在停止所有Appium服务")
+        
+        except Exception as e:
+            logger.error(f"停止所有Appium服务失败: {e}")
+            self._show_error("错误", f"停止所有Appium服务失败: {e}")
+            self.stop_btn.setEnabled(True)
+            self.start_btn.setEnabled(True)
+    
+    def _on_stop_servers_complete(self):
+        """停止服务完成后的处理"""
+        try:
+            # 刷新服务状态
+            self.refresh_appium_status()
+            
+            # 重新启用按钮
+            self.stop_btn.setEnabled(True)
+            self.start_btn.setEnabled(True)
+            
+            logger.info("所有Appium服务已停止")
+        except Exception as e:
+            logger.error(f"更新UI状态失败: {e}")
+            self._show_error("错误", f"更新UI状态失败: {e}")
+    
+    def _show_error(self, title: str, message: str):
+        """显示错误对话框"""
+        QMessageBox.critical(
+            self,
+            title,
+            message,
+            QMessageBox.StandardButton.Ok
+        )
+    
+    def _start_refresh_timer(self):
+        """启动刷新定时器"""
+        try:
+            self.refresh_timer = QTimer()
+            self.refresh_timer.timeout.connect(self._refresh_all)
+            self.refresh_timer.start(self.refresh_interval)
+            logger.info("刷新定时器已启动")
+        except Exception as e:
+            logger.error(f"启动刷新定时器失败: {e}")
+    
+    def _refresh_all(self):
+        """刷新所有状态"""
+        try:
             self.refresh_devices()
+            self.refresh_appium_status()
         except Exception as e:
-            logger.error(f"设置平台失败: {e}")
-            QMessageBox.critical(self, "错误", f"设置平台失败: {str(e)}")
-    
-    def init_device_manager(self):
-        """初始化设备管理器"""
-        try:
-            self.device_manager = DeviceManager()
-            logger.info("设备管理器初始化成功")
-        except Exception as e:
-            logger.error(f"初始化设备管理器失败: {e}")
-            QMessageBox.critical(self, "错误", f"初始化设备管理器失败: {str(e)}")
+            logger.error(f"刷新状态失败: {e}")
     
     def __del__(self):
         """清理资源"""
         try:
-            if hasattr(self, 'refresh_timer'):
+            if self.refresh_timer:
                 self.refresh_timer.stop()
-            if hasattr(self, 'appium_status_timer'):
-                self.appium_status_timer.stop()
+            logger.info("设备标签页资源已清理")
             
-            # 断开所有设备连接
-            for device_id in list(self.connected_devices.keys()):
-                try:
-                    self.disconnect_device(device_id)
-                except Exception as e:
-                    logger.error(f"清理设备 {device_id} 失败: {e}")
-            
-            logger.info("设备管理器资源已清理")
         except Exception as e:
             logger.error(f"清理资源失败: {e}") 
+    
+    def set_platform(self, platform: str):
+        """设置当前平台
+        
+        Args:
+            platform: 平台类型 (android/ios)
+        """
+        try:
+            if platform != self.current_platform:
+                self.current_platform = platform.lower()
+                # 清空设备列表
+                self.devices_tree.clear()
+                # 刷新设备列表
+                self.refresh_devices()
+                logger.info(f"已切换到 {platform} 平台")
+        except Exception as e:
+            logger.error(f"设置平台失败: {e}")
+            self._show_error("错误", f"设置平台失败: {e}")

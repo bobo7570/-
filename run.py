@@ -17,7 +17,7 @@ logger.add(
     "logs/run.log",
     rotation="500 MB",
     retention="30 days",
-    level="INFO",
+    level="DEBUG",
     format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {module}:{function}:{line} | {message}"
 )
 

@@ -1,4 +1,4 @@
-#!e:\python_project\app_auto_tool\.venv\Scripts\python.exe
+#!e:\python_project\app_auto_tool_0213\.venv\Scripts\python.exe
 #-------------------------------------------------------------------------------
 # scripts/readelf.py
 #
